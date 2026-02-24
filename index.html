@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Herriman Restaurant Wheel</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+:root{
+--bg:#071628; --card:rgba(255,255,255,.03); --glass:rgba(255,255,255,.06);
+--muted:#a8b3bf; --accent:#ff6b35; --accent2:#ff8b5a;
+--radius:16px;
+}
+html,body{height:100%;margin:0;font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica Neue,Arial;}
+body{background:linear-gradient(180deg,#071126 0%, #071628 60%); color:#e6eef6; padding:16px; box-sizing:border-box;}
+.card{max-width:900px;margin:0 auto;background:var(--card);border-radius:18px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+h1{font-size:18px;margin:0 0 8px}
+p{margin:6px 0;color:var(--muted);font-size:13px;line-height:1.35}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button,select,input{
+background:var(--glass); border:1px solid rgba(255,255,255,.08); color:inherit;
+padding:10px 12px; border-radius:12px; font-size:14px;
+}
+button.primary{background:linear-gradient(90deg,var(--accent),var(--accent2)); color:#071021; border:none; font-weight:700}
+button:disabled{opacity:.55}
+.hint{font-size:12px;color:var(--muted)}
+#wrap{display:flex;flex-direction:column;align-items:center;margin-top:12px}
+canvas{width:100%;max-width:560px;height:auto;border-radius:50%}
+#result{margin-top:10px;font-weight:700;text-align:center}
+.list{max-height:200px;overflow:auto;margin-top:10px;padding:8px;border-radius:12px;background:rgba(0,0,0,.20)}
+.item{padding:8px;border-bottom:1px dashed rgba(255,255,255,.06)}
+.item b{display:block}
+.small{font-size:12px;color:var(--muted)}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.06);margin-left:6px;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Herriman Restaurant Wheel 🍕🌮🍔</h1>
+<p>
+Loads up to <b>20</b> nearby restaurants using OpenStreetMap (no API keys).
+Filter by <b>genre/cuisine</b>, then spin.
+<span class="pill">iPhone friendly</span>
+</p>
+
+<div class="row" style="margin-top:10px">
+<button class="primary" id="btnLocation">Use my location</button>
+<input id="addr" placeholder="…or enter address (optional)" style="flex:1;min-width:220px" />
+<button id="btnSearch">Search</button>
+<input id="radius" type="number" value="8000" step="500" style="width:120px" />
+<span class="hint">meters</span>
+</div>
+
+<div class="row" style="margin-top:8px">
+<select id="genre">
+<option value="__all">All genres</option>
+</select>
+<button id="btnBuild">Build wheel</button>
+<button class="primary" id="btnSpin">Spin 🎯</button>
+<button id="btnShuffle">Shuffle</button>
+</div>
+
+<div id="wrap" aria-live="polite">
+<canvas id="wheel" width="800" height="800" role="img" aria-label="restaurant decision wheel"></canvas>
+<div id="result"></div>
+</div>
+
+<div class="list" id="list"></div>
+
+<p class="hint" style="margin-top:10px">
+Tip: In Safari, tap <b>Share</b> → <b>Add to Home Screen</b> to use it like an app.
+</p>
+</div>
+
+<script>
+// ====== Settings ======
+const MAX = 20;
+const DEFAULT_ADDR = "4971 W Rosedale Rd, Herriman, UT 84096";
+
+// ====== State ======
+let all = [];
+let filtered = [];
+let angle = 0;
+let v = 0;
+let spinning = false;
+
+// ====== Elements ======
+const $ = (id)=>document.getElementById(id);
+const canvas = $("wheel");
+const ctx = canvas.getContext("2d");
+
+const btnLocation = $("btnLocation");
+const btnSearch = $("btnSearch");
+const btnBuild = $("btnBuild");
+const btnSpin = $("btnSpin");
+const btnShuffle = $("btnShuffle");
+
+const addrInput = $("addr");
+const radiusInput = $("radius");
+const genreSelect = $("genre");
+const listEl = $("list");
+const resultEl = $("result");
+
+// Prefill address (helps on iPhone)
+addrInput.value = DEFAULT_ADDR;
+
+// ====== Helpers ======
+function esc(s){ return (s||"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+function titleizeCuisine(s){
+return (s||"").replaceAll("_"," ").split(" ").filter(Boolean).map(w=>w[0].toUpperCase()+w.slice(1)).join(" ");
+}
+
+async function geocode(addr){
+const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(addr);
+const r = await fetch(url, { headers: { "Accept":"application/json" }});
+const j = await r.json();
+return (j && j[0]) ? { lat:+j[0].lat, lon:+j[0].lon } : null;
+}
+
+async function overpass(lat, lon, rad){
+const q = `
+[out:json][timeout:25];
+(
+node["amenity"="restaurant"](around:${rad},${lat},${lon});
+node["amenity"="fast_food"](around:${rad},${lat},${lon});
+way["amenity"="restaurant"](around:${rad},${lat},${lon});
+relation["amenity"="restaurant"](around:${rad},${lat},${lon});
+);
+out center 80;
+`;
+const r = await fetch("https://overpass-api.de/api/interpreter", { method:"POST", body:q });
+const j = await r.json();
+
+const rows = (j.elements||[]).map(el=>{
+const t = el.tags || {};
+const name = t.name || null;
+const cuisine = t.cuisine || (t.amenity === "fast_food" ? "fast_food" : "restaurant");
+const lat2 = el.lat || (el.center && el.center.lat);
+const lon2 = el.lon || (el.center && el.center.lon);
+if(!name || !lat2 || !lon2) return null;
+const addr = [t["addr:housenumber"], t["addr:street"], t["addr:city"]].filter(Boolean).join(" ");
+return { name, cuisine, address: addr, lat:lat2, lon:lon2 };
+}).filter(Boolean);
+
+// dedupe
+const seen = new Set();
+const out = [];
+for(const r of rows){
+const k = r.name + "|" + Math.round(r.lat*1e4) + "|" + Math.round(r.lon*1e4);
+if(!seen.has(k)){ seen.add(k); out.push(r); }
+}
+out.sort((a,b)=>a.name.localeCompare(b.name));
+return out.slice(0, MAX);
+}
+
+function cuisinesFrom(data){
+const set = new Set();
+for(const p of data){
+(p.cuisine||"").split(";").map(s=>s.trim()).filter(Boolean).forEach(x=>set.add(x));
+}
+return Array.from(set).sort((a,b)=>a.localeCompare(b));
+}
+
+function renderGenreOptions(){
+genreSelect.innerHTML = `<option value="__all">All genres</option>`;
+for(const g of cuisinesFrom(all)){
+const opt = document.createElement("option");
+opt.value = g;
+opt.textContent = titleizeCuisine(g);
+genreSelect.appendChild(opt);
+}
+}
+
+function applyFilter(){
+const g = genreSelect.value;
+if(g === "__all") filtered = all.slice();
+else {
+filtered = all.filter(p => (p.cuisine||"").split(";").map(s=>s.trim()).includes(g));
+if(filtered.length === 0) filtered = all.slice();
+}
+renderList();
+draw();
+}
+
+function renderList(){
+if(filtered.length === 0){
+listEl.innerHTML = `<div class="small">No results yet. Use location or search an address.</div>`;
+return;
+}
+listEl.innerHTML = filtered.map((p,i)=>`
+<div class="item">
+<b>${i+1}. ${esc(p.name)}</b>
+<div class="small">${esc(titleizeCuisine(p.cuisine))}${p.address ? " • " + esc(p.address) : ""}</div>
+</div>
+`).join("");
+}
+
+function shuffle(arr){
+for(let i=arr.length-1;i>0;i--){
+const j = Math.floor(Math.random()*(i+1));
+[arr[i],arr[j]] = [arr[j],arr[i]];
+}
+return arr;
+}
+
+// ====== Wheel drawing ======
+function resize(){
+const dpr = window.devicePixelRatio || 1;
+const size = Math.min(800, Math.max(380, window.innerWidth - 60));
+canvas.width = size * dpr;
+canvas.height = size * dpr;
+canvas.style.width = size + "px";
+canvas.style.height = size + "px";
+}
+
+function wrapText(text, x, y, maxW, lineH){
+const words = (text||"").split(" ");
+let line = "", dy = 0;
+for(let i=0;i<words.length;i++){
+const test = line + words[i] + " ";
+if(ctx.measureText(test).width > maxW && i>0){
+ctx.fillText(line, x, y + dy);
+line = words[i] + " ";
+dy += lineH;
+} else {
+line = test;
+}
+}
+ctx.fillText(line, x, y + dy);
+}
+
+function draw(){
+resize();
+const dpr = window.devicePixelRatio || 1;
+const n = Math.max(1, filtered.length);
+const cx = canvas.width/2, cy = canvas.height/2;
+const R = Math.min(cx, cy) - 10*dpr;
+
+ctx.clearRect(0,0,canvas.width,canvas.height);
+
+ctx.save();
+ctx.translate(cx, cy);
+ctx.rotate(angle);
+
+for(let i=0;i<n;i++){
+const a1 = (i/n) * Math.PI*2;
+const a2 = ((i+1)/n) * Math.PI*2;
+const hue = (180 + i*(360/n)) % 360;
+
+ctx.beginPath();
+ctx.moveTo(0,0);
+ctx.arc(0,0,R,a1,a2);
+ctx.closePath();
+ctx.fillStyle = `hsl(${hue} 60% 40% / .95)`;
+ctx.fill();
+
+// label
+ctx.save();
+ctx.rotate(a1 + (a2-a1)/2);
+ctx.translate(R*0.62, 0);
+ctx.rotate(Math.PI/2);
+ctx.fillStyle = "#fff";
+ctx.font = `${24*dpr}px -apple-system,system-ui`;
+const name = filtered[i] ? filtered[i].name : "";
+wrapText(name, -R*0.30, -10*dpr, 220*dpr, 28*dpr);
+ctx.restore();
+}
+
+// center
+ctx.beginPath();
+ctx.arc(0,0,R*0.18,0,Math.PI*2);
+ctx.fillStyle = "#07121a";
+ctx.fill();
+ctx.restore();
+
+// pointer (top)
+ctx.fillStyle = "rgba(255,255,255,.92)";
+const ps = 18*dpr;
+ctx.beginPath();
+ctx.moveTo(canvas.width/2 - ps, 14*dpr);
+ctx.lineTo(canvas.width/2 + ps, 14*dpr);
+ctx.lineTo(canvas.width/2, 48*dpr);
+ctx.closePath();
+ctx.fill();
+}
+
+function pickWinner(){
+const n = filtered.length;
+if(n === 0) return null;
+const norm = ((2*Math.PI - (angle % (2*Math.PI))) + 2*Math.PI) % (2*Math.PI);
+const idx = Math.floor(norm / (2*Math.PI) * n) % n;
+return filtered[idx];
+}
+
+function animate(){
+if(!spinning) return;
+angle += v;
+v *= 0.992;
+draw();
+if(Math.abs(v) < 0.00012){
+spinning = false; v = 0;
+const w = pickWinner();
+resultEl.innerHTML = w
+? `You got: <span style="color:#ffd6b8">${esc(w.name)}</span><div class="small">${esc(titleizeCuisine(w.cuisine))}</div>`
+: "";
+return;
+}
+requestAnimationFrame(animate);
+}
+
+// ====== Actions ======
+async function runFromCoords(lat, lon){
+const rad = parseInt(radiusInput.value,10) || 8000;
+listEl.innerHTML = `<div class="small">Searching…</div>`;
+resultEl.textContent = "";
+
+try{
+all = await overpass(lat, lon, rad);
+filtered = all.slice();
+renderGenreOptions();
+applyFilter();
+}catch(e){
+console.error(e);
+listEl.innerHTML = `<div class="small">Search failed. Try again (Overpass can be busy).</div>`;
+}
+}
+
+btnLocation.onclick = ()=>{
+if(!navigator.geolocation) return alert("Geolocation not available.");
+navigator.geolocation.getCurrentPosition(
+p => runFromCoords(p.coords.latitude, p.coords.longitude),
+e => alert("Location error: " + e.message),
+{ timeout: 10000 }
+);
+};
+
+btnSearch.onclick = async ()=>{
+const addr = (addrInput.value || "").trim();
+if(!addr) return alert("Enter an address or use location.");
+listEl.innerHTML = `<div class="small">Geocoding…</div>`;
+resultEl.textContent = "";
+const c = await geocode(addr);
+if(!c) return alert("Couldn't find that address. Try a simpler one (e.g., 'Herriman UT').");
+runFromCoords(c.lat, c.lon);
+};
+
+btnBuild.onclick = ()=>{ applyFilter(); };
+
+btnShuffle.onclick = ()=>{
+if(all.length === 0) return;
+all = shuffle(all);
+applyFilter();
+};
+
+btnSpin.onclick = ()=>{
+if(filtered.length === 0) return alert("Load restaurants first.");
+if(spinning) return;
+resultEl.textContent = "";
+v = (Math.random()*0.5 + 1.4) * (Math.PI*2) / 60;
+spinning = true;
+requestAnimationFrame(animate);
+};
+
+genreSelect.onchange = ()=>applyFilter();
+
+window.addEventListener("resize", draw);
+
+// initial draw + hint list
+draw();
+listEl.innerHTML = `<div class="small">Tap <b>Use my location</b> (fastest) or hit <b>Search</b> with the prefilled Herriman address.</div>`;
+</script>
+</body>
+</html>
